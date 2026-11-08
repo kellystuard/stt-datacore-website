@@ -387,20 +387,40 @@ function useMinutesUntil(target: number | undefined) {
     return target === undefined ? 0 : minutes;
 }
 
+const SALE_REFRESH_MS = 30 * 60 * 1000;
+
 /** New way of retrieving sale data. Will be moved to common area when refactoring `restracker.tsx`. */
 function useSaleData() {
-    return useQuery({
+    return useQuery<SaleData>({
         queryKey: ['sales'],
-        staleTime: 15 * 60 * 1000,
-        gcTime: 24 * 60 * 60 * 1000,
-        refetchInterval: 30 * 60 * 1000,
-        retry: true,
-        retryDelay: 60 * 1000,
+        staleTime: SALE_REFRESH_MS,
+        gcTime: 24 * SALE_REFRESH_MS,
+        // Time from the last fetch, not from mount, so data restored from storage refreshes on schedule.
+        // Recomputed after every query update; an error counts as a fetch so failures don't spin.
+        refetchInterval: (query) => {
+            if (query.state.fetchStatus === 'fetching') return false;
+            const lastFetch = Math.max(query.state.dataUpdatedAt, query.state.errorUpdatedAt);
+            return Math.max(lastFetch + SALE_REFRESH_MS - Date.now(), 1000);
+        },
+        // A failed fetch waits for the next scheduled refetch.
+        retry: false,
         meta: { persist: true },
         queryFn: async ({ signal }) => {
-            const response = await fetch(`${process.env.VITE_DATACORE_URL}api/sales`, { signal });
-            if (!response.ok) throw new Error(`Failed to load sale data: ${response.status} ${response.statusText}`);
-            return (await response.json()) as SaleData;
+            try {
+                const response = await fetch(`${process.env.VITE_DATACORE_URL}api/sales`, { signal });
+                if (!response.ok) throw new Error(`Failed to load sale data: ${response.status} ${response.statusText}`);
+                const sale = (await response.json()) as SaleData;
+                console.log(`Sale Data Acquired. Refresh in 30 minutes.`);
+                return sale;
+            }
+            catch (e) {
+                // A cancelled fetch isn't a failure; React Query cancels it when the component unmounts.
+                if (!signal.aborted) {
+                    console.log(e);
+                    console.log(`Fail to call DataCore API for '/api/sales'. will try again in 30 minutes.`);
+                }
+                throw e;
+            }
         },
     });
 }
